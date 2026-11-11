@@ -39,19 +39,26 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             -quiet \
-            build
+            archive
 
       - name: Package IPA
         run: |
           set -e
           APP_PATH="$RUNNER_TEMP/App.xcarchive/Products/Applications/DongPianDi.app"
-          test -d "$APP_PATH"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "expected .app not found, dumping archive tree:"
+            find "$RUNNER_TEMP/App.xcarchive" -maxdepth 5 -name "*.app" -print
+            find "$RUNNER_TEMP/App.xcarchive" -maxdepth 3 -type d -print | head -40
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
           zip -qry DongPianDi.ipa Payload
           ls -lh DongPianDi.ipa
           shasum -a 256 DongPianDi.ipa
+          echo "--- payload ---"
+          ls Payload/DongPianDi.app | head -20
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
