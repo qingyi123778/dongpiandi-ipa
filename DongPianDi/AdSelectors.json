@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "target": "dongpian17.com",
+  "apiPathMark": "/v1/",
+  "hideSelectors": [
+    "aside.app-startup-ad",
+    ".app-startup-ad",
+    ".app-startup-ad-link",
+    "section.movie-player-top-grid-ad",
+    "aside.movie-content-grid-ad",
+    ".movie-content-grid-ad-heading"
+  ],
+  "adListKeys": ["items", "grid_items", "banner_items"],
+  "adBoolKeys": ["enabled", "search_enabled", "calendar_enabled"],
+  "adZeroKeys": ["daily_impression_limit"],
+  "scrubMaxDepth": 6,
+  "scrollHostSelector": "aside.app-startup-ad",
+  "prefillStartupAdKey": "movie-search:startup-ad-seen:v2",
+  "blockWindowOpen": true
+}

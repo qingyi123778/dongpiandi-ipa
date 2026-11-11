@@ -1,0 +1,54 @@
+[
+  {
+    "trigger": {
+      "url-filter": ".*",
+      "if-domain": [
+        "*googletagmanager.com",
+        "*google-analytics.com",
+        "*googlesyndication.com",
+        "*doubleclick.net",
+        "*googleadservices.com",
+        "*adtrafficquality.google",
+        "*analytics.google.com"
+      ]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": ".*",
+      "if-domain": [
+        "*propellerads.com",
+        "*popads.net",
+        "*popcash.net",
+        "*adsterra.com",
+        "*hilltopads.net",
+        "*clickadu.com",
+        "*exoclick.com",
+        "*juicyads.com",
+        "*trafficjunky.net",
+        "*tsyndicate.com",
+        "*onclickads.net",
+        "*mobidea.com",
+        "*revcontent.com",
+        "*mgid.com",
+        "*taboola.com",
+        "*outbrain.com",
+        "*adnxs.com",
+        "*pubmatic.com",
+        "*rubiconproject.com",
+        "*criteo.com",
+        "*zedo.com",
+        "*adcash.com",
+        "*bidvertiser.com",
+        "*revenuehits.com",
+        "*adcolony.com",
+        "*unityads.unity3d.com",
+        "*applovin.com",
+        "*vungle.com",
+        "*chartboost.com"
+      ]
+    },
+    "action": { "type": "block" }
+  }
+]
