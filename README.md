@@ -37,19 +37,40 @@ DongPianDi/
 
 ### 路径 A — GitHub Actions（Windows 上就能出 IPA）
 
+已建好的仓库: https://github.com/qingyi123778/dongpiandi-ipa
+
+代码改动后同步:
+
 ```bash
-cd DongPianDi
-git init -b main
-git add .
-git commit -m "init"
-gh repo create DongPianDi --private --source . --push
+python scripts/api_push.py qingyi123778/dongpiandi-ipa ../.dpd_token .
 ```
 
-没有 `gh` 就在网页上建库再 `git remote add origin <url> && git push -u origin main`。
+或者有可用代理时用 git:
 
-push 后进仓库 **Actions → Build unsigned IPA → 跑完 → Artifacts → DongPianDi-ipa**，下载解压得到 `DongPianDi.ipa`。
+```bash
+cd DongPianDi
+git add . && git commit -m "update"
+git push origin main
+```
 
-Runner 是 `macos-14`，单次 3~5 分钟，免费额度内。
+push 后 **Actions → Build unsigned IPA → Artifacts → DongPianDi-ipa**，下载解压得到 `DongPianDi.ipa`。
+或者命令行直接拉:
+
+```bash
+TOK=$(cat ../.dpd_token)
+ART=$(curl -s -H "Authorization: token $TOK" \
+  "https://api.github.com/repos/qingyi123778/dongpiandi-ipa/actions/runs?per_page=1" \
+  | python -c "import sys,json;print(json.load(sys.stdin)['workflow_runs'][0]['id'])")
+curl -sL -H "Authorization: token $TOK" \
+  "https://api.github.com/repos/qingyi123778/dongpiandi-ipa/actions/runs/$ART/artifacts" \
+  | python -c "import sys,json;print(json.load(sys.stdin)['artifacts'][0]['archive_download_url'])"
+```
+
+### 三个必须避开的坑
+
+1. **`runs-on: macos-14` 在本账号不可用**，报 `The configuration 'macos-14-arm64-us-default' is not supported`，run 2 秒内被 cancelled、不分配 runner。用 **`macos-15`**（实测 95 秒出包）。`macos-13` 已退役，会一直 queued。
+2. **`xcodebuild` 结尾必须是 `archive`，不是 `build`**。`-archivePath` 只在 `archive` 动作下生效，写成 `build` 不会有 `.xcarchive`，`Package IPA` 步骤的 `test -d` 直接失败。
+3. **本机 `git push` 走不通**（`CONNECT tunnel failed, response 502`，代理劫持 443）。`api.github.com` 正常，所以提交走 Contents API，见 `scripts/api_push.py`。
 
 ### 路径 B — 有 Mac
 
@@ -106,7 +127,9 @@ Sideloadly 流程: 插上 iPhone → 拖入 IPA → 填 Apple ID → 输密码�
 
 ## 实测
 
-`python scripts/verify-layers.py`，Chromium + 真实站点，2026-11-12:
+### 去广告（Chromium + Playwright，真实站点）
+
+`python scripts/verify-layers.py`，2026-11-12:
 
 ```
 [PASS] L1 广告条目清零  (36 -> 0)
@@ -119,6 +142,34 @@ RESULT: ALL PASS
 ```
 
 基线 `player_info` 有 12 条 `items` + 12 条 `grid_items`（共 24），`showcase_grid` 12 条，合计 36 条广告素材，注入后全部 0。
+
+### 出包（GitHub Actions macos-15，run 43122644582）
+
+```
+Set up job                success
+Checkout                  success
+Install XcodeGen          success    xcodegen 2.46.0
+Show toolchain            success
+Generate Xcode project    success
+Build archive (unsigned)  success
+Package IPA               success
+Upload artifact           success    963,140 bytes
+```
+
+产物:
+
+```
+文件   DongPianDi.ipa
+大小   965,044 bytes (0.92 MB)
+SHA256 3c0b212b88afcd589d4870a1aaeeb23e5a3fd119589063a75f125f772bf3ef28
+架构   Mach-O arm64 (cputype 0x0100000C)  单个 slice，无 x86_64
+SDK    iphoneos18.5 / Xcode 16.4
+最低   MinimumOSVersion 14.0
+Bundle com.dongpian.dpd / 显示名 懂片帝
+载荷   DongPianDi 132,456 B · Assets.car 928,543 B · AdInject.js · AdSelectors.json · ContentRules.json · LaunchScreen.storyboardc
+```
+
+Info.plist 关键项已核对: `UIApplicationSceneManifest` ✓ `UISupportedInterfaceOrientations` ✓ `UIStatusBarStyle=LightContent` ✓ `UIUserInterfaceStyle=Dark` ✓ `UIDeviceFamily=[1,2]` ✓ `UIRequiredDeviceCapabilities=[arm64]` ✓
 
 浏览器里想自己看: 装 Tampermonkey → 新建脚本 → 粘贴 `web/adblock.user.js` → 打开站点。
 
