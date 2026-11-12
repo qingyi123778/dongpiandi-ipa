@@ -7,13 +7,15 @@
  * 2. 长按倍速。按住播放区加速，松手回到原速率。
  * 3. 在 /me 的服务列表里插入「播放设置」入口，点开走原生面板。
  *
- * 卡顿处理（重要）:
- *   - 角标元素在页面加载时预创建并提升为合成层，长按时只切 opacity，
- *     绝不 appendChild —— 全屏 fixed 布局下插入节点会触发整页重排。
- *   - playbackRate 赋值放进 requestAnimationFrame，避免和站点的
- *     ratechange 渲染在同一帧竞争。
- *   - preservesPitch 常驻关掉。开关它会让 WebKit 重建音频 time-pitch 管线，
- *     进和出各卡一次。
+ * 速率切换处理:
+ *   - 角标在页面加载时预创建并提升为合成层，长按时只切 opacity，绝不 appendChild
+ *     —— 全屏是 fixed 铺满布局，中途插节点会触发整页重排。
+ *   - playbackRate 同步赋值。之前用 requestAnimationFrame 躲站点的 ratechange
+ *     渲染，会留出延迟窗口导致位置抖动，得不偿失。
+ *   - preservesPitch 保持浏览器默认（开启）。关掉能省一次音频 time-pitch 管线
+ *     重建，但 2x 会变成尖声，不可接受。
+ *   - 改速率后 280ms 检查一次位置，只纠正「倒退超过 0.5 秒」的情况。
+ *     WebKit 重整音频管线时偶尔会把播放位置往回带。
  */
 (function () {
   'use strict';
@@ -152,7 +154,7 @@
   /* ---------------------------------------------------------------- */
 
   var press = null;
-  var rafId = 0;
+  var guardSeq = 0;
 
   function currentVideo() {
     var host = document.querySelector(PLAYER_SELECTOR);
@@ -161,20 +163,6 @@
       if (v) { return v; }
     }
     return document.querySelector('video');
-  }
-
-  // 关掉音调校正。这段在每次拿到 video 时都会跑，因为切线路会重建节点。
-  // 开着的话每次改 rate 都要重建 time-pitch 管线，进和出各卡一次。
-  function untunePitch(v) {
-    if (!v) { return; }
-    try {
-      if (v.preservesPitch !== false) { v.preservesPitch = false; }
-    } catch (e) {}
-    try {
-      if ('webkitPreservesPitch' in v && v.webkitPreservesPitch !== false) {
-        v.webkitPreservesPitch = false;
-      }
-    } catch (e) {}
   }
 
   // 只排除真正的可交互控件。不能排除 .art-controls —— 全屏时它铺满整屏，
@@ -188,13 +176,29 @@
     );
   }
 
+  // 同步赋值。之前走 requestAnimationFrame 是为了躲站点的 ratechange 渲染，
+  // 但那样长按/松手会有一个延迟窗口，期间位置状态对不上，反而放大抖动。
+  // 音调校正保持浏览器默认（开），关掉会让 2x 变成尖声。
   function applyRate(video, rate) {
-    // 和站点的 ratechange 渲染错开一帧，减少同帧竞争
-    if (rafId) { cancelAnimationFrame(rafId); }
-    rafId = requestAnimationFrame(function () {
-      rafId = 0;
-      try { video.playbackRate = rate; } catch (e) {}
-    });
+    try { video.playbackRate = rate; } catch (e) {}
+  }
+
+  // 改速率后 WebKit 偶尔会把播放位置往回带一点（音频管线重整）。
+  // 只认「倒退」且幅度超过 0.5s 的情况，往前正常播不动它。
+  function guardPosition(video, expected) {
+    var seq = ++guardSeq;
+    setTimeout(function () {
+      if (seq !== guardSeq) { return; }
+      try {
+        if (video.currentTime < expected - 0.5) {
+          video.currentTime = expected;
+        }
+      } catch (e) {}
+    }, 280);
+  }
+
+  function applyRate(video, rate) {
+    try { video.playbackRate = rate; } catch (e) {}
   }
 
   function releasePress(restore) {
@@ -203,7 +207,12 @@
     press = null;
     if (s.timer) { clearTimeout(s.timer); }
     if (s.active) {
-      if (restore) { applyRate(s.video, s.before); }
+      if (restore) {
+        var pos = 0;
+        try { pos = s.video.currentTime; } catch (e) {}
+        applyRate(s.video, s.before);
+        guardPosition(s.video, pos);
+      }
       hideBadge();
     }
   }
@@ -214,10 +223,14 @@
     var rate = Number(settings.longPressRate);
     if (!isFinite(rate) || rate <= 0) { return; }
     if (s.video.paused) { return; }
+
+    var pos = 0;
+    try { pos = s.video.currentTime; } catch (e) {}
+
     s.active = true;
     s.before = s.video.playbackRate || 1;
-    untunePitch(s.video);
     applyRate(s.video, rate);
+    guardPosition(s.video, pos);
     showBadge(rate);
   }
 
@@ -227,7 +240,6 @@
     if (isInteractive(e.target)) { return; }
     var video = currentVideo();
     if (!video || video.paused) { return; }
-    untunePitch(video);
 
     var t = e.touches[0];
     press = {
