@@ -28,10 +28,6 @@ final class WebViewController: UIViewController {
     private let retryButton = UIButton(type: .system)
     private var progressObservation: NSKeyValueObservation?
 
-    /// 设置入口，可拖动，全屏时自动隐藏
-    private let fab = UIButton(type: .system)
-    private var fabLaidOut = false
-
     /// 播放器是否处于全屏（由网页侧 .art-video-player 的 class 驱动）
     private var playerFullscreen = false {
         didSet {
@@ -39,7 +35,6 @@ final class WebViewController: UIViewController {
             setNeedsStatusBarAppearanceUpdate()
             setNeedsUpdateOfHomeIndicatorAutoHidden()
             applyOrientation(landscape: playerFullscreen)
-            fab.isHidden = playerFullscreen
         }
     }
 
@@ -53,18 +48,8 @@ final class WebViewController: UIViewController {
         buildWebView()
         buildProgressBar()
         buildErrorView()
-        buildFab()
         installUserScripts()
         installContentRulesThenLoad()
-    }
-
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        guard !fabLaidOut, view.bounds.width > 0 else { return }
-        fabLaidOut = true
-        fab.frame = CGRect(x: view.bounds.width - 18 - 44,
-                           y: view.bounds.height * 0.62,
-                           width: 44, height: 44)
     }
 
     deinit {
@@ -181,47 +166,6 @@ final class WebViewController: UIViewController {
 
     // MARK: - 注入
 
-    private func buildFab() {
-        fab.frame = CGRect(x: view.bounds.width - 62, y: view.bounds.height * 0.62,
-                           width: 44, height: 44)
-        fab.backgroundColor = UIColor(white: 0.12, alpha: 0.62)
-        fab.layer.cornerRadius = 22
-        fab.layer.borderWidth = 1
-        fab.layer.borderColor = Cfg.accent.withAlphaComponent(0.5).cgColor
-        fab.tintColor = Cfg.accent
-        let conf = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
-        fab.setImage(UIImage(systemName: "slider.horizontal.3", withConfiguration: conf), for: .normal)
-        fab.addTarget(self, action: #selector(onFabTap), for: .touchUpInside)
-
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(onFabPan(_:)))
-        pan.delegate = self
-        fab.addGestureRecognizer(pan)
-
-        view.addSubview(fab)
-    }
-
-    @objc private func onFabTap() {
-        showSettings()
-    }
-
-    @objc private func onFabPan(_ gesture: UIPanGestureRecognizer) {
-        let delta = gesture.translation(in: view)
-        fab.center = CGPoint(x: fab.center.x + delta.x, y: fab.center.y + delta.y)
-        gesture.setTranslation(.zero, in: view)
-
-        guard gesture.state == .ended || gesture.state == .cancelled else { return }
-        let safe = view.safeAreaInsets
-        let half: CGFloat = 22
-        let minX = half + 8
-        let maxX = view.bounds.width - half - 8
-        let minY = safe.top + half + 8
-        let maxY = view.bounds.height - safe.bottom - half - 8
-        var center = fab.center
-        center.x = min(max(center.x, minX), maxX)
-        center.y = min(max(center.y, minY), maxY)
-        UIView.animate(withDuration: 0.2) { self.fab.center = center }
-    }
-
     // MARK: - 设置面板
 
     private func showSettings() {
@@ -240,8 +184,9 @@ final class WebViewController: UIViewController {
         sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
 
         if let pop = sheet.popoverPresentationController {
-            pop.sourceView = fab
-            pop.sourceRect = fab.bounds
+            pop.sourceView = view
+            pop.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.maxY, width: 0, height: 0)
+            pop.permittedArrowDirections = []
         }
         present(sheet, animated: true)
     }
@@ -263,8 +208,9 @@ final class WebViewController: UIViewController {
             self?.showSettings()
         })
         if let pop = sheet.popoverPresentationController {
-            pop.sourceView = fab
-            pop.sourceRect = fab.bounds
+            pop.sourceView = view
+            pop.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.maxY, width: 0, height: 0)
+            pop.permittedArrowDirections = []
         }
         present(sheet, animated: true)
     }
@@ -298,12 +244,20 @@ final class WebViewController: UIViewController {
     // MARK: - 屏幕方向
 
     fileprivate func handleShellMessage(_ body: [String: Any]) {
-        guard let type = body["type"] as? String, type == "fullscreen",
-              let on = body["value"] as? Bool else { return }
-        if Thread.isMainThread {
-            playerFullscreen = on
-        } else {
-            DispatchQueue.main.async { [weak self] in self?.playerFullscreen = on }
+        guard let type = body["type"] as? String else { return }
+
+        if type == "fullscreen", let on = body["value"] as? Bool {
+            if Thread.isMainThread {
+                playerFullscreen = on
+            } else {
+                DispatchQueue.main.async { [weak self] in self?.playerFullscreen = on }
+            }
+            return
+        }
+
+        // 网页 /me 里的「播放设置」行被点
+        if type == "openSettings" {
+            DispatchQueue.main.async { [weak self] in self?.showSettings() }
         }
     }
 
@@ -518,18 +472,6 @@ extension WebViewController: WKUIDelegate {
             }
             return UIMenu(title: "", children: [open])
         })
-    }
-}
-
-// MARK: - 手势
-
-extension WebViewController: UIGestureRecognizerDelegate {
-
-    /// 位移太小当作点击，交给 button 的 touchUpInside
-    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
-        let v = pan.velocity(in: view)
-        return abs(v.x) > 80 || abs(v.y) > 80
     }
 }
 
