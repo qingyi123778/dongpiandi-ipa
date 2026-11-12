@@ -1,15 +1,19 @@
 /*
  * DongPianDi Shell — 原生能力桥
  *
- * 两件事:
- *   1. 全屏状态同步。站点播放器是 ArtPlayer，点全屏只加 CSS 类
- *      （art-fullscreen-web / art-fullscreen），iOS Safari 不支持
- *      Element.requestFullscreen，所以系统不会转屏，必须由 App 主动转。
- *   2. 长按倍速。按住播放区 accelerare，松手回到原速率（不是固定 1.0，
- *      用户可能自己设过 1.5x 常速）。
+ * 1. 全屏状态同步。站点播放器是 ArtPlayer，点全屏只加 CSS 类
+ *    （art-fullscreen-web / art-fullscreen），iOS Safari 不支持
+ *    Element.requestFullscreen，所以系统不会转屏，必须由 App 主动转。
+ * 2. 长按倍速。按住播放区加速，松手回到原速率。
+ * 3. 在 /me 的服务列表里插入「播放设置」入口，点开走原生面板。
  *
- * 配置来源: window.__DPD_SETTINGS__（原生注入）
- * 运行时更新: window.__DPD_APPLY_SETTINGS__({longPressRate, autoRotate})
+ * 卡顿处理（重要）:
+ *   - 角标元素在页面加载时预创建并提升为合成层，长按时只切 opacity，
+ *     绝不 appendChild —— 全屏 fixed 布局下插入节点会触发整页重排。
+ *   - playbackRate 赋值放进 requestAnimationFrame，避免和站点的
+ *     ratechange 渲染在同一帧竞争。
+ *   - preservesPitch 常驻关掉。开关它会让 WebKit 重建音频 time-pitch 管线，
+ *     进和出各卡一次。
  */
 (function () {
   'use strict';
@@ -17,21 +21,6 @@
   var W = window;
   if (W.__DPD_SHELL__) { return; }
   W.__DPD_SHELL__ = 1;
-
-  // 先挂上配置入口。atDocumentStart 阶段 DOM 还没成形，后面任何一步
-  // 抛异常都不能让这个入口缺失，否则原生改设置会静默失效。
-  W.__DPD_APPLY_SETTINGS__ = function (next) {
-    if (!next || typeof next !== 'object') { return; }
-    if (typeof next.longPressRate === 'number') { settings.longPressRate = next.longPressRate; }
-    if (typeof next.autoRotate === 'boolean') { settings.autoRotate = next.autoRotate; }
-    if (settings.autoRotate === false && lastFullscreen === true) {
-      lastFullscreen = false;
-      sendFullscreen(false);
-    } else {
-      syncFullscreen();
-    }
-    if (!settings.longPressRate) { releasePress(true); }
-  };
 
   var native = W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.dpdShell;
 
@@ -46,22 +35,25 @@
   var LONG_PRESS_MS = 420;
   var MOVE_TOLERANCE = 12;
   var BADGE_ID = 'dpd-rate-badge';
+  var ROW_FLAG = 'dpdSettingsRow';
 
   /* ---------------------------------------------------------------- */
-  /* 长按不弹系统菜单/放大镜                                            */
+  /* 对外入口先挂上：atDocumentStart 时 DOM 还没成形，后面任何一步抛异常 */
+  /* 都不能让这个入口缺失，否则原生改设置会静默失效                      */
   /* ---------------------------------------------------------------- */
 
-  function injectStyle() {
-    if (!document.documentElement) { return; }
-    if (document.getElementById('dpd-shell-style')) { return; }
-    var el = document.createElement('style');
-    el.id = 'dpd-shell-style';
-    el.textContent =
-      '.art-video-player,.art-video-player *{-webkit-touch-callout:none!important;' +
-      '-webkit-user-select:none!important;user-select:none!important;}';
-    var host = document.head || document.documentElement;
-    if (host) { host.appendChild(el); }
-  }
+  W.__DPD_APPLY_SETTINGS__ = function (next) {
+    if (!next || typeof next !== 'object') { return; }
+    if (typeof next.longPressRate === 'number') { settings.longPressRate = next.longPressRate; }
+    if (typeof next.autoRotate === 'boolean') { settings.autoRotate = next.autoRotate; }
+    if (settings.autoRotate === false && lastFullscreen === true) {
+      lastFullscreen = false;
+      sendFullscreen(false);
+    } else {
+      syncFullscreen();
+    }
+    if (!settings.longPressRate) { releasePress(true); }
+  };
 
   /* ---------------------------------------------------------------- */
   /* 全屏状态 → 原生                                                    */
@@ -82,9 +74,13 @@
     try { native.postMessage({ type: 'fullscreen', value: on }); } catch (e) {}
   }
 
+  function requestNativeSettings() {
+    if (!native) { return; }
+    try { native.postMessage({ type: 'openSettings' }); } catch (e) {}
+  }
+
   function syncFullscreen() {
     var on = isFullscreenOn(document.querySelector(PLAYER_SELECTOR));
-    // 关掉自动横屏时不上报 true，保持竖屏
     var report = on && settings.autoRotate !== false;
     if (report !== lastFullscreen) {
       lastFullscreen = report;
@@ -93,10 +89,70 @@
   }
 
   /* ---------------------------------------------------------------- */
+  /* 样式                                                              */
+  /* ---------------------------------------------------------------- */
+
+  function injectStyle() {
+    if (!document.documentElement) { return; }
+    if (document.getElementById('dpd-shell-style')) { return; }
+    var el = document.createElement('style');
+    el.id = 'dpd-shell-style';
+    el.textContent =
+      '.art-video-player,.art-video-player *{-webkit-touch-callout:none!important;' +
+      '-webkit-user-select:none!important;user-select:none!important;}';
+    var host = document.head || document.documentElement;
+    if (host) { host.appendChild(el); }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* 倍速角标：预创建，只切 opacity                                     */
+  /* ---------------------------------------------------------------- */
+
+  var badgeEl = null;
+
+  function ensureBadge() {
+    if (badgeEl && badgeEl.parentNode) { return badgeEl; }
+    var host = document.body || document.documentElement;
+    if (!host) { return null; }
+    var el = document.getElementById(BADGE_ID);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = BADGE_ID;
+      el.style.cssText =
+        'position:fixed;left:50%;' +
+        'top:calc(env(safe-area-inset-top, 0px) + 26px);' +
+        'transform:translate3d(-50%,0,0);' +
+        'z-index:2147483001;pointer-events:none;opacity:0;' +
+        'padding:7px 15px;border-radius:999px;' +
+        'background:rgba(13,14,16,.82);color:#ffcf32;' +
+        'font:700 14px/1.2 -apple-system,BlinkMacSystemFont,sans-serif;' +
+        'letter-spacing:.02em;' +
+        'backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);' +
+        'transition:opacity .12s linear;' +
+        'will-change:opacity;contain:layout style;';
+      host.appendChild(el);
+    }
+    badgeEl = el;
+    return el;
+  }
+
+  function showBadge(rate) {
+    var el = ensureBadge();
+    if (!el) { return; }
+    el.textContent = rate.toFixed(1) + 'x 倍速播放中';
+    el.style.opacity = '1';
+  }
+
+  function hideBadge() {
+    if (badgeEl) { badgeEl.style.opacity = '0'; }
+  }
+
+  /* ---------------------------------------------------------------- */
   /* 长按倍速                                                           */
   /* ---------------------------------------------------------------- */
 
   var press = null;
+  var rafId = 0;
 
   function currentVideo() {
     var host = document.querySelector(PLAYER_SELECTOR);
@@ -107,41 +163,38 @@
     return document.querySelector('video');
   }
 
-  // 只排除真正的可交互控件。
-  // 注意不能排除 .art-controls —— 全屏时它是铺满整屏的容器，长按空白处的
-  // target 就是它，一并排掉的话全屏状态下永远触发不了倍速。
+  // 关掉音调校正。这段在每次拿到 video 时都会跑，因为切线路会重建节点。
+  // 开着的话每次改 rate 都要重建 time-pitch 管线，进和出各卡一次。
+  function untunePitch(v) {
+    if (!v) { return; }
+    try {
+      if (v.preservesPitch !== false) { v.preservesPitch = false; }
+    } catch (e) {}
+    try {
+      if ('webkitPreservesPitch' in v && v.webkitPreservesPitch !== false) {
+        v.webkitPreservesPitch = false;
+      }
+    } catch (e) {}
+  }
+
+  // 只排除真正的可交互控件。不能排除 .art-controls —— 全屏时它铺满整屏，
+  // 一并排掉的话全屏状态下永远触发不了。
   function isInteractive(target) {
     if (!target || !target.closest) { return false; }
-    var hit = target.closest(
+    return !!target.closest(
       'button, input, textarea, select, a, [role="button"], [role="slider"], ' +
       '.art-setting, .art-contextmenus, .art-notice, ' +
       '.art-progress, .art-volume'
     );
-    return !!hit;
   }
 
-  function showBadge(rate) {
-    var el = document.getElementById(BADGE_ID);
-    if (!el) {
-      el = document.createElement('div');
-      el.id = BADGE_ID;
-      el.style.cssText =
-        'position:fixed;left:50%;top:18%;transform:translateX(-50%);' +
-        'z-index:2147483001;pointer-events:none;display:none;' +
-        'padding:7px 15px;border-radius:999px;' +
-        'background:rgba(13,14,16,.82);color:#ffcf32;' +
-        'font:700 14px/1.2 -apple-system,BlinkMacSystemFont,sans-serif;' +
-        'letter-spacing:.02em;backdrop-filter:blur(10px);' +
-        '-webkit-backdrop-filter:blur(10px);';
-      (document.body || document.documentElement).appendChild(el);
-    }
-    el.textContent = rate.toFixed(1) + 'x 倍速播放中';
-    el.style.display = 'block';
-  }
-
-  function hideBadge() {
-    var el = document.getElementById(BADGE_ID);
-    if (el) { el.style.display = 'none'; }
+  function applyRate(video, rate) {
+    // 和站点的 ratechange 渲染错开一帧，减少同帧竞争
+    if (rafId) { cancelAnimationFrame(rafId); }
+    rafId = requestAnimationFrame(function () {
+      rafId = 0;
+      try { video.playbackRate = rate; } catch (e) {}
+    });
   }
 
   function releasePress(restore) {
@@ -150,9 +203,7 @@
     press = null;
     if (s.timer) { clearTimeout(s.timer); }
     if (s.active) {
-      if (restore) {
-        try { s.video.playbackRate = s.before; } catch (e) {}
-      }
+      if (restore) { applyRate(s.video, s.before); }
       hideBadge();
     }
   }
@@ -165,8 +216,8 @@
     if (s.video.paused) { return; }
     s.active = true;
     s.before = s.video.playbackRate || 1;
-    try { s.video.playbackRate = rate; } catch (e) {}
-    // iOS 上 playbackRate > 2 会被系统静音，这是 AVPlayer 的行为，改不了
+    untunePitch(s.video);
+    applyRate(s.video, rate);
     showBadge(rate);
   }
 
@@ -175,7 +226,8 @@
     if (e.touches.length !== 1) { return; }
     if (isInteractive(e.target)) { return; }
     var video = currentVideo();
-    if (!video) { return; }
+    if (!video || video.paused) { return; }
+    untunePitch(video);
 
     var t = e.touches[0];
     press = {
@@ -208,8 +260,70 @@
   document.addEventListener('touchcancel', onTouchEnd, { passive: true });
 
   /* ---------------------------------------------------------------- */
+  /* /me 页面注入「播放设置」入口                                       */
+  /* ---------------------------------------------------------------- */
+
+  var GEAR =
+    '<span class="dpd-me-service-icon" aria-hidden="true">' +
+    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" ' +
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<line x1="21" x2="14" y1="4" y2="4"></line>' +
+    '<line x1="10" x2="3" y1="4" y2="4"></line>' +
+    '<line x1="21" x2="12" y1="12" y2="12"></line>' +
+    '<line x1="8" x2="3" y1="12" y2="12"></line>' +
+    '<line x1="21" x2="16" y1="20" y2="20"></line>' +
+    '<line x1="12" x2="3" y1="20" y2="20"></line>' +
+    '<line x1="14" x2="14" y1="2" y2="6"></line>' +
+    '<line x1="8" x2="8" y1="10" y2="14"></line>' +
+    '<line x1="16" x2="16" y1="18" y2="22"></line>' +
+    '</svg></span>';
+
+  var CHEVRON =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" ' +
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>';
+
+  function injectSettingsRow() {
+    if (location.pathname !== '/me') { return; }
+    var list = document.querySelector('.dpd-me-service-list');
+    if (!list) { return; }
+    if (list.querySelector('[' + 'data-dpd="settings-row"' + ']')) { return; }
+
+    var rows = list.querySelectorAll('.dpd-me-service-row');
+    var anchor = null;
+    for (var i = 0; i < rows.length; i++) {
+      if ((rows[i].textContent || '').trim().indexOf('设置') === 0 ||
+          (rows[i].textContent || '').indexOf('设置') >= 0) {
+        anchor = rows[i];
+        break;
+      }
+    }
+    if (!anchor) { return; }
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'dpd-me-service-row';
+    btn.setAttribute('data-dpd', 'settings-row');
+    btn.innerHTML = GEAR + '<strong>播放设置</strong>' + CHEVRON;
+    btn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      requestNativeSettings();
+    }, true);
+
+    anchor.insertAdjacentElement('afterend', btn);
+  }
+
+  /* ---------------------------------------------------------------- */
   /* 启动                                                              */
   /* ---------------------------------------------------------------- */
+
+  function tick() {
+    try { syncFullscreen(); } catch (e) {}
+    try { injectSettingsRow(); } catch (e) {}
+    try { ensureBadge(); } catch (e) {}
+  }
 
   // 切线路/切集时 ArtPlayer 会重建节点，只认 target 是 art-video-player 的 class 变更
   try {
@@ -228,19 +342,20 @@
     });
   } catch (e) {}
 
-  setInterval(syncFullscreen, POLL_MS);
-  syncFullscreen();
+  // /me 页面由 React 渲染，节点插入后可能被重渲染冲掉，靠低频轮询补回来
+  setInterval(tick, POLL_MS);
+
+  function boot() {
+    try { injectStyle(); } catch (e) {}
+    tick();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  }
+  boot();
 
   W.addEventListener('popstate', function () {
     releasePress(true);
-    setTimeout(syncFullscreen, 400);
+    setTimeout(tick, 400);
   });
-
-  function bootStyle() {
-    try { injectStyle(); } catch (e) {}
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', bootStyle, { once: true });
-  }
-  bootStyle();
 })();
