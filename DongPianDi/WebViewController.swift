@@ -14,6 +14,7 @@ final class WebViewController: UIViewController {
         static let background = UIColor(red: 0.051, green: 0.055, blue: 0.063, alpha: 1.0)
         static let progressHeight: CGFloat = 2.0
         static let ruleListID = "dpd-adblock-v3"
+        static let shellChannel = "dpdShell"
     }
 
     // MARK: - 视图
@@ -26,6 +27,18 @@ final class WebViewController: UIViewController {
     private let errorLabel = UILabel()
     private let retryButton = UIButton(type: .system)
     private var progressObservation: NSKeyValueObservation?
+
+    /// 播放器是否处于全屏（由网页侧 .art-video-player 的 class 驱动）
+    private var playerFullscreen = false {
+        didSet {
+            guard playerFullscreen != oldValue else { return }
+            setNeedsStatusBarAppearanceUpdate()
+            setNeedsUpdateOfHomeIndicatorAutoHidden()
+            applyOrientation(landscape: playerFullscreen)
+        }
+    }
+
+    private lazy var scriptBridge = ScriptBridge(target: self)
 
     // MARK: - 生命周期
 
@@ -45,6 +58,12 @@ final class WebViewController: UIViewController {
 
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 
+    // 播放器全屏时铺满，隐藏状态栏与小白条
+    override var prefersStatusBarHidden: Bool { playerFullscreen }
+    override var prefersHomeIndicatorAutoHidden: Bool { playerFullscreen }
+
+    // 不用限制方向：限定死会导致全屏状态漏检时用户连手动转屏都做不到。
+    // 让四个方向都可用，横屏靠 applyOrientation 主动请求。
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         .allButUpsideDown
     }
@@ -74,6 +93,9 @@ final class WebViewController: UIViewController {
         webView.isOpaque = false
         webView.backgroundColor = Cfg.background
         webView.scrollView.refreshControl = refresh
+
+        // ShellBridge.js 通过这个通道回传播放器全屏状态
+        webView.configuration.userContentController.add(scriptBridge, name: Cfg.shellChannel)
 
         refresh.tintColor = Cfg.accent
         refresh.addTarget(self, action: #selector(onPullRefresh), for: .valueChanged)
@@ -145,18 +167,58 @@ final class WebViewController: UIViewController {
     // MARK: - 注入
 
     private func installUserScripts() {
-        guard
-            let url = Bundle.main.url(forResource: "AdInject", withExtension: "js"),
-            let body = try? String(contentsOf: url, encoding: .utf8)
-        else {
-            return
+        // 去广告脚本
+        if let url = Bundle.main.url(forResource: "AdInject", withExtension: "js"),
+           let body = try? String(contentsOf: url, encoding: .utf8) {
+            // 配置拼在脚本前，AdInject.js 从 window.__DPD_CONFIG__ 取
+            let source = "window.__DPD_CONFIG__ = \(AdBlockConfig.shared.injectConfigJSON);\n" + body
+            webView.configuration.userContentController.addUserScript(
+                WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+            )
         }
-        // 配置拼在脚本前，AdInject.js 从 window.__DPD_CONFIG__ 取
-        let source = "window.__DPD_CONFIG__ = \(AdBlockConfig.shared.injectConfigJSON);\n" + body
-        let script = WKUserScript(source: source,
-                                  injectionTime: .atDocumentStart,
-                                  forMainFrameOnly: false)
-        webView.configuration.userContentController.addUserScript(script)
+
+        // 全屏状态桥
+        if let url = Bundle.main.url(forResource: "ShellBridge", withExtension: "js"),
+           let body = try? String(contentsOf: url, encoding: .utf8) {
+            webView.configuration.userContentController.addUserScript(
+                WKUserScript(source: body, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+        }
+    }
+
+    // MARK: - 屏幕方向
+
+    fileprivate func handleShellMessage(_ body: [String: Any]) {
+        guard let type = body["type"] as? String, type == "fullscreen",
+              let on = body["value"] as? Bool else { return }
+        if Thread.isMainThread {
+            playerFullscreen = on
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.playerFullscreen = on }
+        }
+    }
+
+    /// 网页全屏只是 CSS 铺满，不会让系统转屏，这里由 App 主动转
+    private func applyOrientation(landscape: Bool) {
+        let mask: UIInterfaceOrientationMask = landscape ? .landscape : .portrait
+
+        if #available(iOS 16.0, *) {
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+            guard let scene = view.window?.windowScene else { return }
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
+                // 用户开了竖屏锁定、或处于 iPad 分屏时这里会失败，退回老接口再试一次
+                NSLog("[DPD] geometry update failed: \(error)")
+                DispatchQueue.main.async {
+                    let target: UIInterfaceOrientation = landscape ? .landscapeRight : .portrait
+                    UIDevice.current.setValue(target.rawValue, forKey: "orientation")
+                    UIViewController.attemptRotationToDeviceOrientation()
+                }
+            }
+        } else {
+            let target: UIInterfaceOrientation = landscape ? .landscapeRight : .portrait
+            UIDevice.current.setValue(target.rawValue, forKey: "orientation")
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
     }
 
     private func installContentRulesThenLoad() {
@@ -347,5 +409,23 @@ extension WebViewController: WKUIDelegate {
             }
             return UIMenu(title: "", children: [open])
         })
+    }
+}
+
+// MARK: - JS → 原生
+
+/// 弱引用转发，避免 userContentController 强持有 VC 造成循环引用
+private final class ScriptBridge: NSObject, WKScriptMessageHandler {
+
+    weak var target: WebViewController?
+
+    init(target: WebViewController) {
+        self.target = target
+    }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any] else { return }
+        target?.handleShellMessage(body)
     }
 }
