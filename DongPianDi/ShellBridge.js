@@ -18,6 +18,21 @@
   if (W.__DPD_SHELL__) { return; }
   W.__DPD_SHELL__ = 1;
 
+  // 先挂上配置入口。atDocumentStart 阶段 DOM 还没成形，后面任何一步
+  // 抛异常都不能让这个入口缺失，否则原生改设置会静默失效。
+  W.__DPD_APPLY_SETTINGS__ = function (next) {
+    if (!next || typeof next !== 'object') { return; }
+    if (typeof next.longPressRate === 'number') { settings.longPressRate = next.longPressRate; }
+    if (typeof next.autoRotate === 'boolean') { settings.autoRotate = next.autoRotate; }
+    if (settings.autoRotate === false && lastFullscreen === true) {
+      lastFullscreen = false;
+      sendFullscreen(false);
+    } else {
+      syncFullscreen();
+    }
+    if (!settings.longPressRate) { releasePress(true); }
+  };
+
   var native = W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.dpdShell;
 
   var settings = W.__DPD_SETTINGS__ || {};
@@ -37,13 +52,15 @@
   /* ---------------------------------------------------------------- */
 
   function injectStyle() {
+    if (!document.documentElement) { return; }
     if (document.getElementById('dpd-shell-style')) { return; }
     var el = document.createElement('style');
     el.id = 'dpd-shell-style';
     el.textContent =
       '.art-video-player,.art-video-player *{-webkit-touch-callout:none!important;' +
       '-webkit-user-select:none!important;user-select:none!important;}';
-    (document.head || document.documentElement).appendChild(el);
+    var host = document.head || document.documentElement;
+    if (host) { host.appendChild(el); }
   }
 
   /* ---------------------------------------------------------------- */
@@ -219,23 +236,11 @@
     setTimeout(syncFullscreen, 400);
   });
 
-  function bootStyle() { injectStyle(); }
+  function bootStyle() {
+    try { injectStyle(); } catch (e) {}
+  }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', bootStyle, { once: true });
   }
   bootStyle();
-
-  // 原生改设置后即时生效，不用刷新页面
-  W.__DPD_APPLY_SETTINGS__ = function (next) {
-    if (!next || typeof next !== 'object') { return; }
-    if (typeof next.longPressRate === 'number') { settings.longPressRate = next.longPressRate; }
-    if (typeof next.autoRotate === 'boolean') { settings.autoRotate = next.autoRotate; }
-    if (settings.autoRotate === false && lastFullscreen === true) {
-      lastFullscreen = false;
-      sendFullscreen(false);
-    } else {
-      syncFullscreen();
-    }
-    if (!settings.longPressRate) { releasePress(true); }
-  };
 })();
