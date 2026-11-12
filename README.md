@@ -197,25 +197,36 @@ React 重渲染会把插入的节点冲掉，所以有 500ms 轮询复查（`inj
 
 **iOS 上超过 2x 会被系统静音**，这是 AVPlayer 的行为，`playbackRate` 设得上去但没声音。
 
-### 卡顿处理
+### 卡顿与回溯处理
 
-第一版长按和松手各卡一下，三个原因叠在一起：
+第一版长按和松手各卡一下，而且 2x 声音变尖、播放位置偶尔往回跳。四个措施，前三个是踩坑后回退的：
 
-1. **角标是运行时 `appendChild` 进去的** — 全屏是 `position:fixed` 铺满布局，中途插入节点触发整页重排。改成页面加载时预创建，只切 `opacity`，元素本身带 `will-change:opacity` + `contain:layout style` 提前进合成层。
-2. **`preservesPitch` 在进和出时各改一次** — WebKit 要重建音频 time-pitch 管线，两个方向都卡。改成常驻 `false`（`v.preservesPitch = false` + `v.webkitPreservesPitch = false`），只在拿到 video 元素时设一次。代价是加速时声音变调，但 2x 下不明显。
-3. **`playbackRate` 赋值和站点的 `ratechange` 渲染撞在同一帧** — 赋值包进 `requestAnimationFrame`，让站点的重渲染先跑完。
+1. **角标预创建** — 原来长按时才 `appendChild`。全屏是 `position:fixed` 铺满布局，中途插节点触发整页重排。改成页面加载时建好，只切 `opacity`，带 `will-change:opacity` + `contain:layout style` 提前进合成层。**这个保留，是真正有效的一条。**
+
+2. **`playbackRate` 同步赋值** — 试过用 `requestAnimationFrame` 躲站点的 `ratechange` 渲染，结果留出 16ms 延迟窗口，长按/松手时位置状态对不上，抖动反而更明显。**已回退成同步赋值。**
+
+3. **`preservesPitch` 不动** — 试过常驻 `false` 来省掉音频 time-pitch 管线重建，卡顿确实少一点，但 2x 变成尖声，用户不能接受。**已回退成浏览器默认（开启）。**
+
+4. **位置守卫** — WebKit 在重整音频管线时偶尔把 `currentTime` 往回带。改速率后 280ms 检查一次，只纠正「倒退超过 0.5 秒」的情况，正常前进不动它。
+
+```js
+function guardPosition(video, expected) {
+  var seq = ++guardSeq;
+  setTimeout(function () {
+    if (seq !== guardSeq) return;
+    if (video.currentTime < expected - 0.5) video.currentTime = expected;
+  }, 280);
+}
+```
 
 实测（真实播放页，播放中 + 模拟全屏）:
 
 ```
-preservesPitch 属性存在 : true（可写）
-角标已预建              : true
-长按中 rate=2  opacity=1
-松手后 rate=1  opacity=0
-角标 top                : calc(env(safe-area-inset-top, 0px) + 26px)
+preservesPitch = true
+t0=5.68 → 长按 900ms 后 t1=6.99  (delta +1.31, rate=2)   2x 下走得比实时快
+        → 松手 700ms 后 t2=7.81  (delta +0.82, rate=1)   1x 恢复
+时间单调递增: true     ← 没有回退
 ```
-
-角标从 `top:18%` 改到固定 26px + 安全区，不再贴近画面中线；横屏时由 `env(safe-area-inset-top)` 避开刘海。
 
 ### 一个必须避开的坑
 
