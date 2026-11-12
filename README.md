@@ -158,6 +158,50 @@ D 加 art-fullscreen      [..., {value: true}]
 
 `supportedInterfaceOrientations` 故意保持 `.allButUpsideDown` 不做限制：万一站点改类名导致全屏状态漏检，用户至少还能手动转屏，不会彻底锁死。
 
+## 长按倍速
+
+全屏和竖屏都生效。按住播放区 420ms 进入加速，松手回到**原速率**（不是固定 1.0，你如果自己在站点里设过 1.5x 常速，松手还是 1.5x）。
+
+改动落在 `ShellBridge.js`：
+
+```js
+document.addEventListener('touchstart', onTouchStart, { passive: true });
+// 420ms 后 video.playbackRate = settings.longPressRate
+// 移动超过 12px 视为滑动手势，取消
+// touchend / touchcancel 恢复 s.before
+```
+
+**不触发长按的区域**：进度条、音量条、设置面板、按钮、链接。注意**不能**把 `.art-controls` 整个排除——全屏时它是铺满整屏的容器，一并排掉的话全屏状态下永远触发不了。
+
+加速时屏幕上方弹一个角标 `2.0x 倍速播放中`，松手消失。
+
+### 设置入口
+
+右下角有个半透明悬浮球（可拖动，全屏自动隐藏）。点开是原生 `UIAlertController`：
+
+- **长按倍速** — 关闭 / 1.5x / 2.0x / 2.5x / 3.0x，当前项带 ✓
+- **全屏自动横屏** — 关掉后全屏不再转横屏
+
+配置存 `UserDefaults`（`PlayerSettings.swift`），改完立刻通过 `window.__DPD_APPLY_SETTINGS__()` 下发给网页，不用刷新。
+
+**iOS 上超过 2x 会被系统静音**，这是 AVPlayer 的行为，`playbackRate` 设得上去但没声音。选项里保留了 2.5x / 3.0x，知道这点再用。
+
+实测（真实播放页，播放中 + 模拟全屏，逐个档位切换）:
+
+```
+apply 入口: function
+默认 2.0 : 长按中=2  松手后=1
+改 3.0 后: 长按中=3  松手后=1
+关闭     : 长按中=1  松手后=1
+全屏消息流: [false, true]
+```
+
+### 一个必须避开的坑
+
+`atDocumentStart` 阶段 `document.documentElement` 可能还是 `null`，`appendChild` 会抛异常。异常一抛，IIFE 后半段的赋值全部跳过——表现为「设置改了没反应」，而且页面其他功能完全正常，极难定位。
+
+所以 `__DPD_APPLY_SETTINGS__` 的赋值放在 IIFE 最前面（`__DPD_SHELL__ = 1` 之后立刻挂），后续所有 DOM 操作包 try。这个 bug 第一次构建就踩了，验证脚本报 `__DPD_APPLY_SETTINGS__ is not a function` 才抓到。
+
 ## 实测
 
 ### 去广告（Chromium + Playwright，真实站点）
