@@ -177,24 +177,45 @@ document.addEventListener('touchstart', onTouchStart, { passive: true });
 
 ### 设置入口
 
-右下角有个半透明悬浮球（可拖动，全屏自动隐藏）。点开是原生 `UIAlertController`：
+在站点自己的「我的」页面里，`设置` 那一行下面插一行 `播放设置`，用同一套 `dpd-me-service-row` 样式，图标换成 sliders、右侧 chevron 照抄，视觉上和原生列表项一致。
+
+```js
+// ShellBridge.js
+document.querySelector('.dpd-me-service-list')
+  .querySelectorAll('.dpd-me-service-row')  // 找到文字含「设置」的那行
+  .insertAdjacentElement('afterend', btn)   // 插在它后面
+```
+
+点这行 → `postMessage({type:'openSettings'})` → 原生弹 `UIAlertController`：
 
 - **长按倍速** — 关闭 / 1.5x / 2.0x / 2.5x / 3.0x，当前项带 ✓
 - **全屏自动横屏** — 关掉后全屏不再转横屏
 
-配置存 `UserDefaults`（`PlayerSettings.swift`），改完立刻通过 `window.__DPD_APPLY_SETTINGS__()` 下发给网页，不用刷新。
+配置存 `UserDefaults`（`PlayerSettings.swift`），改完立刻通过 `window.__DPD_APPLY_SETTINGS__()` 下发，不用刷新。
 
-**iOS 上超过 2x 会被系统静音**，这是 AVPlayer 的行为，`playbackRate` 设得上去但没声音。选项里保留了 2.5x / 3.0x，知道这点再用。
+React 重渲染会把插入的节点冲掉，所以有 500ms 轮询复查（`injectSettingsRow` 里先判断是否已存在，不会重复插）。
 
-实测（真实播放页，播放中 + 模拟全屏，逐个档位切换）:
+**iOS 上超过 2x 会被系统静音**，这是 AVPlayer 的行为，`playbackRate` 设得上去但没声音。
+
+### 卡顿处理
+
+第一版长按和松手各卡一下，三个原因叠在一起：
+
+1. **角标是运行时 `appendChild` 进去的** — 全屏是 `position:fixed` 铺满布局，中途插入节点触发整页重排。改成页面加载时预创建，只切 `opacity`，元素本身带 `will-change:opacity` + `contain:layout style` 提前进合成层。
+2. **`preservesPitch` 在进和出时各改一次** — WebKit 要重建音频 time-pitch 管线，两个方向都卡。改成常驻 `false`（`v.preservesPitch = false` + `v.webkitPreservesPitch = false`），只在拿到 video 元素时设一次。代价是加速时声音变调，但 2x 下不明显。
+3. **`playbackRate` 赋值和站点的 `ratechange` 渲染撞在同一帧** — 赋值包进 `requestAnimationFrame`，让站点的重渲染先跑完。
+
+实测（真实播放页，播放中 + 模拟全屏）:
 
 ```
-apply 入口: function
-默认 2.0 : 长按中=2  松手后=1
-改 3.0 后: 长按中=3  松手后=1
-关闭     : 长按中=1  松手后=1
-全屏消息流: [false, true]
+preservesPitch 属性存在 : true（可写）
+角标已预建              : true
+长按中 rate=2  opacity=1
+松手后 rate=1  opacity=0
+角标 top                : calc(env(safe-area-inset-top, 0px) + 26px)
 ```
+
+角标从 `top:18%` 改到固定 26px + 安全区，不再贴近画面中线；横屏时由 `env(safe-area-inset-top)` 避开刘海。
 
 ### 一个必须避开的坑
 
