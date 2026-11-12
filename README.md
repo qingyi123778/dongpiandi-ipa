@@ -125,6 +125,39 @@ Sideloadly 流程: 插上 iPhone → 拖入 IPA → 填 Apple ID → 输密码�
 
 **不去的东西** — `.react-player-ad-safety-notice`（平台自己的防骗滚动提示）保留，它不是广告。
 
+## 全屏与横屏
+
+站点播放器是 **ArtPlayer**，点全屏只做 CSS 层的事:
+
+| class | 含义 | iOS 表现 |
+|---|---|---|
+| `art-fullscreen-web` | 网页全屏，容器 `position:fixed` 铺满视口 | 铺满了，但系统不转屏、状态栏还在 |
+| `art-fullscreen` | 系统级 Fullscreen API | iOS Safari 不支持 `Element.requestFullscreen`，走不到 |
+
+所以纯 WKWebView 壳会出现「点了全屏，画面占满但还竖着」——这不是 App 没做旋转支持，是网页本身就没请求转屏。
+
+修法是把全屏状态交给原生处理:
+
+1. `ShellBridge.js` 用 MutationObserver 盯 `.art-video-player` 的 class，命中 `art-fullscreen-web` / `art-fullscreen` 就通过 `window.webkit.messageHandlers.dpdShell` 上报
+2. `WebViewController` 收到后置 `playerFullscreen`，`didSet` 里调 `requestGeometryUpdate(.iOS(interfaceOrientations: .landscape))` 主动转横屏
+3. 同时 `prefersStatusBarHidden` / `prefersHomeIndicatorAutoHidden` 返回 true，藏掉状态栏和小白条
+4. 退出全屏 class 移除 → 转回竖屏
+
+保留站点自己的播放器 UI（弹幕、选集、倍速、投屏都还在），只补系统层行为。
+
+实测（真实播放页 `/player/av_OysjC...`，注入桥接 + 手动切换 class）:
+
+```
+A 初始              [{type: fullscreen, value: false}]
+B 加 art-fullscreen-web  [..., {value: true}]     ← 进入全屏，已上报
+C 移除              [..., {value: false}]         ← 退出全屏，已上报
+D 加 art-fullscreen      [..., {value: true}]
+```
+
+**已知限制** — 开着系统「竖屏锁定」时 `requestGeometryUpdate` 会失败（系统策略，任何 App 都绕不过），此时 App 只能走 `UIDevice.setValue` 老接口，成功率不保证。看片前把控制中心的竖屏锁关掉。
+
+`supportedInterfaceOrientations` 故意保持 `.allButUpsideDown` 不做限制：万一站点改类名导致全屏状态漏检，用户至少还能手动转屏，不会彻底锁死。
+
 ## 实测
 
 ### 去广告（Chromium + Playwright，真实站点）
