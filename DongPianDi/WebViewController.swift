@@ -28,6 +28,10 @@ final class WebViewController: UIViewController {
     private let retryButton = UIButton(type: .system)
     private var progressObservation: NSKeyValueObservation?
 
+    /// 设置入口，可拖动，全屏时自动隐藏
+    private let fab = UIButton(type: .system)
+    private var fabLaidOut = false
+
     /// 播放器是否处于全屏（由网页侧 .art-video-player 的 class 驱动）
     private var playerFullscreen = false {
         didSet {
@@ -35,6 +39,7 @@ final class WebViewController: UIViewController {
             setNeedsStatusBarAppearanceUpdate()
             setNeedsUpdateOfHomeIndicatorAutoHidden()
             applyOrientation(landscape: playerFullscreen)
+            fab.isHidden = playerFullscreen
         }
     }
 
@@ -48,8 +53,18 @@ final class WebViewController: UIViewController {
         buildWebView()
         buildProgressBar()
         buildErrorView()
+        buildFab()
         installUserScripts()
         installContentRulesThenLoad()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard !fabLaidOut, view.bounds.width > 0 else { return }
+        fabLaidOut = true
+        fab.frame = CGRect(x: view.bounds.width - 18 - 44,
+                           y: view.bounds.height * 0.62,
+                           width: 44, height: 44)
     }
 
     deinit {
@@ -166,6 +181,99 @@ final class WebViewController: UIViewController {
 
     // MARK: - 注入
 
+    private func buildFab() {
+        fab.frame = CGRect(x: view.bounds.width - 62, y: view.bounds.height * 0.62,
+                           width: 44, height: 44)
+        fab.backgroundColor = UIColor(white: 0.12, alpha: 0.62)
+        fab.layer.cornerRadius = 22
+        fab.layer.borderWidth = 1
+        fab.layer.borderColor = Cfg.accent.withAlphaComponent(0.5).cgColor
+        fab.tintColor = Cfg.accent
+        let conf = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        fab.setImage(UIImage(systemName: "slider.horizontal.3", withConfiguration: conf), for: .normal)
+        fab.addTarget(self, action: #selector(onFabTap), for: .touchUpInside)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(onFabPan(_:)))
+        pan.delegate = self
+        fab.addGestureRecognizer(pan)
+
+        view.addSubview(fab)
+    }
+
+    @objc private func onFabTap() {
+        showSettings()
+    }
+
+    @objc private func onFabPan(_ gesture: UIPanGestureRecognizer) {
+        let delta = gesture.translation(in: view)
+        fab.center = CGPoint(x: fab.center.x + delta.x, y: fab.center.y + delta.y)
+        gesture.setTranslation(.zero, in: view)
+
+        guard gesture.state == .ended || gesture.state == .cancelled else { return }
+        let safe = view.safeAreaInsets
+        let half: CGFloat = 22
+        let minX = half + 8
+        let maxX = view.bounds.width - half - 8
+        let minY = safe.top + half + 8
+        let maxY = view.bounds.height - safe.bottom - half - 8
+        var center = fab.center
+        center.x = min(max(center.x, minX), maxX)
+        center.y = min(max(center.y, minY), maxY)
+        UIView.animate(withDuration: 0.2) { self.fab.center = center }
+    }
+
+    // MARK: - 设置面板
+
+    private func showSettings() {
+        guard presentedViewController == nil else { return }
+        let s = PlayerSettings.shared
+        let sheet = UIAlertController(title: "播放设置", message: nil, preferredStyle: .actionSheet)
+
+        sheet.addAction(UIAlertAction(title: "长按倍速　\(s.rateLabel)", style: .default) { [weak self] _ in
+            self?.pickRate()
+        })
+        sheet.addAction(UIAlertAction(title: "全屏自动横屏　\(s.autoRotate ? "开" : "关")",
+                                      style: .default) { [weak self] _ in
+            PlayerSettings.shared.autoRotate.toggle()
+            self?.applySettingsToWeb()
+        })
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
+
+        if let pop = sheet.popoverPresentationController {
+            pop.sourceView = fab
+            pop.sourceRect = fab.bounds
+        }
+        present(sheet, animated: true)
+    }
+
+    private func pickRate() {
+        let s = PlayerSettings.shared
+        let sheet = UIAlertController(title: "长按倍速",
+                                      message: "按住播放区生效，松手还原。iOS 上超过 2x 可能没有声音。",
+                                      preferredStyle: .actionSheet)
+        for rate in [0.0, 1.5, 2.0, 2.5, 3.0] {
+            let title = rate == 0 ? "关闭" : String(format: "%.1fx", rate)
+            let mark = abs(s.longPressRate - rate) < 0.001 ? "　✓" : ""
+            sheet.addAction(UIAlertAction(title: title + mark, style: .default) { [weak self] _ in
+                PlayerSettings.shared.longPressRate = rate
+                self?.applySettingsToWeb()
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "返回", style: .cancel) { [weak self] _ in
+            self?.showSettings()
+        })
+        if let pop = sheet.popoverPresentationController {
+            pop.sourceView = fab
+            pop.sourceRect = fab.bounds
+        }
+        present(sheet, animated: true)
+    }
+
+    private func applySettingsToWeb() {
+        let json = PlayerSettings.shared.json
+        webView.evaluateJavaScript("window.__DPD_APPLY_SETTINGS__ && window.__DPD_APPLY_SETTINGS__(\(json));")
+    }
+
     private func installUserScripts() {
         // 去广告脚本
         if let url = Bundle.main.url(forResource: "AdInject", withExtension: "js"),
@@ -177,11 +285,12 @@ final class WebViewController: UIViewController {
             )
         }
 
-        // 全屏状态桥
+        // 全屏状态桥 + 长按倍速，配置拼在脚本前
         if let url = Bundle.main.url(forResource: "ShellBridge", withExtension: "js"),
            let body = try? String(contentsOf: url, encoding: .utf8) {
+            let source = "window.__DPD_SETTINGS__ = \(PlayerSettings.shared.json);\n" + body
             webView.configuration.userContentController.addUserScript(
-                WKUserScript(source: body, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+                WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
             )
         }
     }
@@ -409,6 +518,18 @@ extension WebViewController: WKUIDelegate {
             }
             return UIMenu(title: "", children: [open])
         })
+    }
+}
+
+// MARK: - 手势
+
+extension WebViewController: UIGestureRecognizerDelegate {
+
+    /// 位移太小当作点击，交给 button 的 touchUpInside
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
+        let v = pan.velocity(in: view)
+        return abs(v.x) > 80 || abs(v.y) > 80
     }
 }
 
